@@ -1,0 +1,351 @@
+---
+title: "Basic popgen of plurivora"
+subtitle: "Populations based on Town and Source"
+author: "Nick Carleson"
+date: "November 14, 2017"
+tags: [Town, Source]
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Populations
+### How do the _Phytophthora pluriva_ populations cluster?
+
+We'll need to attach the metadata and get a hierarchy going for the 69 samples that survived filtering. Then we'll make PCA, structure, and Fst plots.
+
+This picks up after depth_missingness_coding_genotypedgvcf.Rmd
+
+## Data review
+### Load files
+```{r load, results="hide", message=FALSE}
+library(vcfR)
+library(adegenet)
+library(ape)
+library(poppr)
+library(dplyr)
+library(treemap)
+library(ade4)
+library(magrittr)
+library(hierfstat)
+library(gplots)
+library(reshape2)
+library(ggplot2)
+
+load("~/Data/plurivora/pst1_vcf3")
+load("~/Data/plurivora/pst1_genind")
+load("~/Data/plurivora/pst1_genlight")
+```
+
+### Initializing objects
+Check out the objects and prepare them
+```{r inspect}
+pst1_vcf3
+
+# Convert from genind to genclone for further processing
+pst1_genclone <- as.genclone(pst1_genind)
+
+# Load in definitions of strata
+strata_defs <- read.table("~/Documents/plurivora/GBS_plurivora_strata_for_uneak.csv",
+                          sep = ",", header = TRUE, stringsAsFactors = FALSE)
+# Reduce the number of defined individuals in key to only filtered individuals
+# for genclone
+strata_defs_filtered <- subset(strata_defs[,], strata_defs$new_name %in% rownames(pst1_genclone@tab))
+strata(pst1_genclone) <- strata_defs_filtered
+# for genlight
+strata_defs_filtered <- subset(strata_defs[,], strata_defs$new_name %in% pst1_genlight@ind.names)
+strata(pst1_genlight) <- strata_defs_filtered
+```
+
+### Setting populations
+Now get ready to begin some analysis and do first steps
+```{r begin analysis}
+# Set populations based on strata
+setPop(pst1_genclone) <- ~Town/County
+setPop(pst1_genlight) <- ~Town/County
+pst1_genclone
+# for genclone
+poppr(pst1_genclone)
+# for genlight
+diversity_stats(pst1_genlight)
+
+# Reassigning strata
+pststrata <- strata(pst1_genclone) %>%
+  group_by(Town, County, Source, Nursery) %>%
+  summarize(Count = n())
+pststrata
+```
+
+### Visualize what's in our data
+This will get us a first look at what composes our dataset
+```{r first viz}
+# Adjusting the aesthetics for the labels
+label_position <- list(c("center", "top"), c("center", "center"), c("center", "bottom"))
+label_size     <- c(Town = 15, County = 10, Source = 10, Nursery = 0)
+
+# Plotting, First three arguments are necessary.
+treemap(dtf = pststrata, index = c("Town", "County", "Source", "Nursery"), vSize = "Count",
+        fontsize.labels = label_size, align.labels = label_position, vColor = "Town",
+        title = "P. plurivora GBS samples")
+
+```
+
+### Clone correction and Locus summaries
+Does clone correction have an impact?
+```{r clones}
+mcc_TY <- clonecorrect(pst1_genclone, strata = ~Town/County, keep = 1:2)
+# Before clone correction
+pst1_genclone
+# After clone correction
+mcc_TY
+# apparently no difference...moving on anyway.
+cc <- locus_table(mcc_TY, info = FALSE)
+mp <- locus_table(pst1_genclone, info = FALSE)
+locus_diff = mp - cc
+barplot(locus_diff[, "1-D"], ylab = "Change in Simpson's Index", xlab = "Locus",
+main = "Comparison of clone-corrected vs. uncorrected data")
+# There is no difference at all. SUPER weird. Looking at the locus table for one reveals why...
+locus_table(pst1_genclone)[1:20,]
+# All the stats are missing! Let's just move on I guess?
+```
+
+### Phylogenetically uninformative loci
+Remove loci that contain less than 2/N % of loci, with N equal to number of individuals in data set
+```{r loci}
+nLoc(pst1_genclone)
+iPst <- informloci(pst1_genclone)
+nLoc(iPst)
+# Notice there are fewer loci - how does this affect association?
+poppr(pst1_genclone)
+poppr(iPst)
+```
+# Analysis
+## DAPC
+### Geography
+First take a look at geography.
+```{r DAPC, message=FALSE}
+# for genclone
+# Scatter plot
+dapc.iPst <- dapc(iPst, var.contrib = TRUE, center = FALSE, n.pca = 50,  n.da = nPop(iPst) - 1)
+optim.a.score(dapc.iPst)
+dapc.iPst <- dapc(iPst, var.contrib = TRUE, center = FALSE, n.pca = 17, n.da = 2)
+scatter(dapc.iPst, mstree = TRUE, lwd = 2, lty = 2)
+
+# Compoplot
+dapc.results <- as.data.frame(dapc.iPst$posterior)
+dapc.results$pop <- pop(iPst)
+dapc.results$indNames <- rownames(dapc.results)
+dapc.results <- melt(dapc.results)
+colnames(dapc.results) <- c("Original_Pop","Sample","Assigned_Pop","Posterior_membership_probability")
+p <- ggplot(dapc.results, aes(x=Sample, y=Posterior_membership_probability, fill=Assigned_Pop))
+p <- p + geom_bar(stat='identity') 
+p <- p + scale_fill_manual(values = rainbow(4)) 
+p <- p + facet_grid(~Original_Pop, scales = "free")
+p <- p + theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8))
+p
+
+# for genlight
+# dapc.iPst_genlight <- dapc(pst1_genlight, var.contrib = TRUE, n.pca = 30,  n.da = nPop(iPst) - 1)
+# optim.a.score(dapc.iPst)
+# dapc.iPst_genlight <- dapc(pst1_genlight, var.contrib = TRUE, n.pca = 7, n.da = 2)
+# scatter(dapc.iPst_genlight, mstree = TRUE, lwd = 2, lty = 2)
+```
+### Sample source
+```{r structure 2, fig.width=12}
+# Establish source specifications
+setPop(pst1_genclone) <- ~Source
+setPop(pst1_genlight) <- ~Source
+iPst_source <- informloci(pst1_genclone)
+```
+```{r sample source continued}
+#for genclone
+# Scatter plots
+dapc.iPst_source <- dapc(iPst_source, var.contrib = TRUE, center = FALSE, n.pca = 25,  n.da = nPop(iPst) - 1)
+optim.a.score(dapc.iPst_source)
+dapc.iPst_source <- dapc(iPst_source, var.contrib = TRUE, center = FALSE, n.pca = 19, n.da = 2)
+scatter(dapc.iPst_source, mstree = TRUE, lwd = 2, lty = 2)
+
+# Compoplots
+dapc.results <- as.data.frame(dapc.iPst_source$posterior)
+dapc.results$pop <- pop(iPst_source)
+dapc.results$indNames <- rownames(dapc.results)
+library(reshape2)
+dapc.results <- melt(dapc.results)
+colnames(dapc.results) <- c("Original_Pop","Sample","Assigned_Pop","Posterior_membership_probability")
+p <- ggplot(dapc.results, aes(x=Sample, y=Posterior_membership_probability, fill=Assigned_Pop))
+p <- p + geom_bar(stat='identity') 
+p <- p + scale_fill_manual(values = rainbow(4)) 
+p <- p + facet_grid(~Original_Pop, scales = "free")
+p <- p + theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8))
+p
+
+# for genlight
+# dapc.iPst_source_genlight <- dapc(pst1_genlight, var.contrib = TRUE, n.pca = 30,  n.da = nPop(pst1_genlight) - 1)
+# scatter(dapc.iPst_source_genlight, mstree = TRUE, lwd = 2, lty = 2)
+```
+Looks like there MIGHT be different between source. We'll have to do some more analyses later to find out for sure though. There is a lot of overlap and some things that don't make sense - I would expect root and soil to be more closely linked than root and stem. I also would expect stem and leaf to be more closely linked than root and stem. These are actually in similar environments.
+
+## Trees
+We'll use Provesti's distance, also known as bitwise distance. It can use any marker and CAN handle mising data - which we definitely have.
+Don't forget that:
+
+genclone object | Population metric | Location
+--------------- | ----------------- | ---------
+iPst            |Town_County        | Where on the Oregon map
+iPst_Source     |Source             | Where on the plant system
+
+```{r genetic distance, fig.height=15, error = TRUE}
+# rough tree, not bootstrapped
+# dist <- provesti.dist(iPst)
+# tree <- dist %>% # using distance just calculated
+#   nj() %>% # calculate neighbor-joining tree
+#   ladderize() # organize branches by clade
+# plot(tree)
+# add.scale.bar(length = 0.05) # scale bar showing 5% diff.
+
+# bootstrapped tree
+geo_tree <- aboot(iPst, dist = nei.dist, sample = 200, tree = "nj", cutoff = 50, quiet = TRUE)
+library("ape")
+library(phangorn)
+cols <- rainbow(4)
+plot.phylo(ladderize(midpoint(geo_tree)), cex = 0.8, font = 2, adj = 0, tip.color = cols[pop(iPst)],
+           label.offset = 0.0125, type = "unrooted")
+nodelabels(geo_tree$node.label, adj = c(1.3, -0.5), frame = "n", cex = 0.8,
+           font = 3, xpd = TRUE)
+legend('topleft', legend = levels(pop(iPst)), fill = cols, border = FALSE, bty = "n", cex = 2)
+#axisPhylo(3)
+aboot(iPst_source, dist = provesti.dist, sample = 200, tree = "nj", cutoff = 50, quiet = TRUE)
+```
+##Fst
+```{r fst, fig.width=16}
+# for genclone
+fst_iPst <- pairwise.fst(iPst, res.type="matrix")
+fst_iPst_source <- pairwise.fst(iPst_source, res.type = "matrix")
+
+fst_iPst
+heatmap.2(fst_iPst, dendrogram = "column", "Town_County of origin",
+          srtCol = 15, srtRow = 60)
+fst_iPst_source
+heatmap.2(fst_iPst_source, dendrogram = "column", main = "Sample Source",
+          srtCol = 15, srtRow = 60)
+
+# for genlight - DOES NOT WORK
+# setPop(pst1_genclone) <- ~Source
+# fst_iPst <- pairwise.fst(pst1_genclone, res.type="matrix")
+# setPop(pst1_genclone) <- ~Town/County
+# fst_iPst_source <- pairwise.fst(pst1_genclone, res.type = "matrix")
+# 
+# fst_iPst
+# heatmap.2(fst_iPst, dendrogram = "column", "Town_County of origin",
+#           srtCol = 15, srtRow = 75)
+# fst_iPst_source
+# heatmap.2(fst_iPst_source, dendrogram = "column", main = "Sample Source",
+#           srtCol = 15, srtRow = 75)
+```
+
+##PCA
+```{r other tools}
+# for genlight only - glPca doesnt recognize genclones
+# First by geography
+setPop(pst1_genlight) <- ~Town/County
+setPop(pst1_genclone) <- ~Town/County
+iPst.pca <- glPca(pst1_genlight, nf = 3)
+barplot(iPst.pca$eig, col = heat.colors(50), main = "PCA Eigenvalues")
+iPst.pca.scores <- as.data.frame(iPst.pca$scores)
+iPst.pca.scores$pop <- pop(pst1_genclone)
+set.seed(9)
+p <- ggplot(iPst.pca.scores, aes(x=PC1, y=PC2, colour=pop)) 
+p <- p + geom_point(size=2)
+p <- p + stat_ellipse(level = 0.95, size = 1)
+p <- p + scale_color_manual(values = rainbow(4)) 
+p <- p + geom_hline(yintercept = 0) 
+p <- p + geom_vline(xintercept = 0) 
+p <- p + theme_bw()
+p
+
+# Now by source
+setPop(pst1_genlight) <- ~Source
+setPop(pst1_genclone) <- ~Source
+iPst.pca <- glPca(pst1_genlight, nf = 3)
+barplot(iPst.pca$eig, col = heat.colors(50), main = "PCA Eigenvalues")
+iPst.pca.scores <- as.data.frame(iPst.pca$scores)
+iPst.pca.scores$pop <- pop(pst1_genclone)
+set.seed(9)
+p <- ggplot(iPst.pca.scores, aes(x=PC1, y=PC2, colour=pop)) 
+p <- p + geom_point(size=2)
+p <- p + stat_ellipse(level = 0.95, size = 1)
+p <- p + scale_color_manual(values = rainbow(4)) 
+p <- p + geom_hline(yintercept = 0) 
+p <- p + geom_vline(xintercept = 0) 
+p <- p + theme_bw()
+p
+```
+
+## Minimum Spanning Network
+```{r lib, results="hide", message=FALSE}
+library(igraph)
+library(RColorBrewer)
+```
+```{r msn, error=TRUE}
+# First geography
+Pst.dist <- bitwise.dist(iPst)
+Pst.msn <- poppr.msn(iPst, Pst.dist, showplot = FALSE, include.ties = T)
+
+node.size <- rep(2, times = nInd(iPst))
+names(node.size) <- indNames(iPst)
+vertex.attributes(Pst.msn$graph)$size <- node.size
+
+set.seed(9)
+plot_poppr_msn(iPst, Pst.msn, palette=brewer.pal(n = nPop(iPst), name = "Dark2"), gadj = 70)
+
+# Now source
+Pst.dist_source <- bitwise.dist(iPst_source)
+Pst.msn_source <- poppr.msn(iPst_source, Pst.dist_source, showplot = FALSE, include.ties = T)
+
+node.size <- rep(2, times = nInd(iPst_source))
+names(node.size) <- indNames(iPst_source)
+vertex.attributes(Pst.msn_source$graph)$size <- node.size
+
+set.seed(9)
+plot_poppr_msn(iPst_source, Pst.msn_source, palette=brewer.pal(n = nPop(iPst_source),
+                                                                      name = "Dark2"), gadj = 70)
+```
+
+## Linkage Disequilbrium
+```{r ld}
+iPst_county <- iPst
+setPop(iPst_county) <- ~County
+Clack <- popsub(iPst_county, "Clackamas")
+Benton <- popsub(iPst_county, "Benton")
+Yam <- popsub(iPst_county, "Yamhill")
+#ia(iPst, sample = 99)
+ia(Clack, sample = 99)
+ia(Benton, sample = 99)
+ia(Yam, sample = 99)
+```
+## AMOVA
+```{r amova, message = FALSE, error = FALSE}
+iPst_amova_town <- poppr.amova(iPst, ~Town, clonecorrect = TRUE)
+iPst_amova_county <- poppr.amova(iPst, ~County, clonecorrect = TRUE)
+iPst_amova_source <- poppr.amova(iPst, ~Source, clonecorrect = TRUE)
+set.seed(1776)
+iPst_town_signif <- randtest(iPst_amova_town, nrepet = 999)
+iPst_county_signif <- randtest(iPst_amova_county, nrepet = 999)
+iPst_source_signif <- randtest(iPst_amova_source, nrepet = 999)
+# Compare to a random structure...
+iPst.new <- iPst
+set.seed(1901)
+strata(iPst.new) <- strata(iPst)[sample(nInd(iPst)), -1]
+iPst_town_random <- poppr.amova(iPst.new, ~Town)
+iPst_town_random
+iPst_town_random_signif <- randtest(iPst_town_random, nrepet = 999)
+
+# now compare... there is definitely something going on here - pval of vetween Town variation is much different.
+iPst_town_signif
+iPst_county_signif
+iPst_town_random_signif
+```

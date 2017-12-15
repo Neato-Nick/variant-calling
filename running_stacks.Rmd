@@ -1,0 +1,162 @@
+---
+title: "GBS Raw Reads to PopGen"
+author: "Nick Carleson"
+date: "December 11, 2017"
+output:
+  html_document:
+#    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libs, results='hide', message=FALSE, warning=FALSE}
+library(ggplot2)
+library(vcfR)
+library(reshape2)
+```
+# Variant Calling
+
+## What the data is
+We start this process in the command line, on the CGRB Server. Here are some important considerations for our data:
+
+* Illumina HiSeq 3000
+* 150bp read length
+* single-end reads
+* est. 80-120 Mb _Phytophthora_ genome
+* 96 samples with technical reps
+* 5-10bp variable barcode length
+* PstI-MspI digestion combination
+    + SbfI-MspI also used but coverage was worse
+
+For this project, we'll use `Stacks 1.47` for _de novo_ calling of variants. Main references for help are:
+
+* Catchen et al. Stacks: building and genotyping loci de novo from short-read sequences. _G3: Genes, genomes, genetics_ 2011, __3,__ 171-182
+* Catchen et al. Stacks: an analysis tool set for population genomics. _Molecular Ecology_ 2013, __11,__ 3124-3140
+* Paris et al. Lost in parameter space: a road map for `STACKS`. _Methods in Ecology and Evolution_ 2017, __8,__ 1360–1373
+
+```{r bash, engine = 'bash', eval = FALSE}
+cut -d ',' -f 3,4 key_GBS0102_uniquenames_fixedsample.csv | tail -n +2 | sed 's/,/\t/g' > barcode_sorted_unique_fixed.txt
+```
+the first 10 lines look like this, with barcode on the left and sample name on the right. It's tab separated.
+
+```{r sample head, engine = 'bash', eval = FALSE, highlight = FALSE}
+head barcode_sorted_unique_fixed.txt
+TGACGCCA	M-04-R
+CAGATA	M-16-S_1
+TTGCTG	M-16-S_2
+GAAGTG	M-22-S3
+TAGCGGAT	M-24-R
+TATTCGCAT	M-30-R
+ATAGAT	M-4311
+CGCAACCAGT	M-4313
+CCGAACA	M-4314
+GGAAGACAT	M-4319_1
+```
+
+## Running stacks
+And now for the Stacks _de novo_ pipeline! The main step is denovo_map.pl, which is a wrapper script that runs the core commands of stacks. We will run it using the `populations` setting - not the `genotypes` setting; we don't have parents in our population. We will run this analysis with a few different population scenarios - Town, County, and Source. We want to see what the Fst statistics are for each of these. 
+```{r bash pipeline, engine = 'bash', eval = FALSE}
+# demultiplex, quality filter
+process_shortreads -f ../raw_data_links/ALL_AH7HTYBBXX_s_3_fastq.txt.gz -b barcode_sorted_unique_fixed.txt \
+-o ~/grunwald_lab_me/plurivora/demultiplexed_process_shortreads_3/ -i gzfastq -q -D
+```
+```{r bash pipeline2, engine = 'bash', eval = FALSE}
+# while that's running, make population maps to analyze
+awk -F ',' '{ print $1"\t"$2 }' popmap_stacks_pstI.csv | tail -n +2 > popmap_isolate.tsv
+awk -F ',' '{ print $1"\t"$4 }' popmap_stacks_pstI.csv | tail -n +2 > popmap_source.tsv
+awk -F ',' '{ print $1"\t"$5 }' popmap_stacks_pstI.csv | tail -n +2 > popmap_nursery.tsv
+awk -F ',' '{ print $1"\t"$6 }' popmap_stacks_pstI.csv | tail -n +2 > popmap_town.tsv
+awk -F ',' '{ print $1"\t"$7 }' popmap_stacks_pstI.csv | tail -n +2 > popmap_county.tsv
+awk -F ',' '{ print $1"\t"$6"\t"$7 }' popmap_stacks_pstI.csv | tail -n +2 > popmap_town_county.tsv
+```
+```{r bash pipeline3, engine = 'bash', eval = FALSE}
+# make all directories necessary
+mkdir denovo_map/nursery denovo_map/county denovo_map/isolate denovo_map/source
+mkdir denovo_map/town denovo_map/town_county
+```
+```{r bash pipeline4, engine = 'bash', eval = FALSE}
+# automatically run ustacks -> cstacks -> sstacks -> population
+# change out town_county below with each type of metadata
+# should be an array job, where that changes out depending of row on list you're on
+# but I was too lazy. Don't be me. Don't be too lazy
+denovo_map.pl -o ./denovo_map/town_county -T 8 -O ../popmap_town_county.tsv --samples ./ \
+-X "populations:--fstats" -X "populations:--log_fst_comp" \
+-X "populations:--vcf" -X "populations:--plink" -X "populations:--genepop" \
+-m 5 -M 5 -n 6 -S -b 1
+```
+This data set is ~365 million reads... it took stacks a very long time to complete. I wasn't sure if it was running properly, but running on subsets of 1.2m, 2.4m, and 3.6m reads showed the process was running properly. Scripts to complete this subsampling are on github as:
+
+* subsample_fastq.sh
+* subsample_fastq_weedlist.sh
+
+full commands (7 steps) and files required to execute successfully are in `pipeline_rerun_denovo_map_subset.txt`.
+
+## PLINK analysis
+None of this is probably legit because I haven't done filtering for coverage yet. I probably should use vcfR (below) to filter and then create the bed.
+
+First, Admixture. Admixture didn't actually work using PED files, I had to convert tob BED first :/
+```{r admixture, engine='bash', eval=FALSE}
+plink --file batch_1.plink --maf 0.05 --make-bed --out batch_2 --noweb
+for K in 1 2 3 4 5; do admixture --cv batch_2.bed $K | tee log${K}.out; done
+```
+Now use `grep -h CV log*.out` to get the cross validation list. 
+
+> CV error (K=1): 1.08850  
+CV error (K=2): 0.69783  
+CV error (K=3): 0.74573  
+CV error (K=4): 0.59584  
+CV error (K=5): 0.67708  
+
+Let's get that into an R data frame
+```{r cv-df}
+cv <- data.frame(K = c(1,2,3,4,5), CV = c(1.08850, 0.69783, 0.74573, 0.59584, 0.67708))
+ggplot(cv, mapping = aes(y = CV, x = K)) +
+  geom_line(alpha = 1.0) +
+  geom_point(alpha = 1.0) +
+  ylab("cross-validation error")
+```
+
+Cross validation plot seems to hint at having four populations. Let's see what the "Structure" plot looks like.
+
+```{r structure plot, fig.width=12}
+tbl <- read.table("~/Data/plurivora/PstI/stacks_simulated_data/admixture/batch_2.4.Q")
+# fam file contains metadata
+fam <- read.table("~/Data/plurivora/PstI/stacks_simulated_data/admixture/batch_2.fam")
+# assign sample names to numbers
+tbl$Sample <- fam$V2
+tbl$PopName <- fam$V1
+# TODO: infer population names and reassing V1:V4
+
+tbl2 <- melt(tbl, id = c("Sample", "PopName"))
+#colnames(tbl2) <- c("Sample", "Cluster", "Composition")
+colnames(tbl2) <- c("Sample", "PopName", "Cluster", "Composition")
+# TODO: split data frame into populations by samples
+tbl2_split <- split(tbl2, tbl2$PopName)
+# order the samples by most common, most likely cluster assignment
+tbl2_sorted <- tbl2[with(tbl2, order(PopName, Cluster, -Composition)), ]
+# TODO: recombine the data frame
+
+# TODO: ordered factor the sample name
+#tbl2_sorted$Sample <- factor(tbl2_sorted$Sample, levels = tbl2_sorted$Sample)
+tbl2$Sample <- factor(tbl2$Sample, levels = tbl2[order(tbl2$PopName, tbl2$Cluster, -tbl2$Composition),])
+ggplot(tbl2_sorted) +
+  geom_bar(mapping = aes(x = Sample, y = Composition, fill = Cluster),
+           stat = "identity") +
+  ylab("% Likelihood of Assignment") +
+  facet_grid(. ~ PopName, scales = "free_x") +
+  #scale_x_discrete(limits=tbl2_sorted$Sample)
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+# TODO: Ask help from Zach for ordering if things get shuffled
+```
+# VCF Wrangling
+let's look at one of the vcf file outputs from a sample run to see if it worked at all
+```{r packages, results='hide', message=FALSE, warning=FALSE}
+library(vcfR)
+vcf <- read.vcfR('~/Data/plurivora/PstI/stacks_simulated_data/batch_1.vcf')
+vcf
+dp <- extract.gt(vcf, element = "DP", as.numeric = TRUE)
+boxplot(dp, las = 3)
+heatmap(dp)
+```

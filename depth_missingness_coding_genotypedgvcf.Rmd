@@ -1,0 +1,341 @@
+---
+title: "vcfs2depth"
+author: "Nick Carleson"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=12)
+knitr::opts_chunk$set(fig.height=8)
+```
+
+## VCF Processing ##
+Start with processing the genotype-VCF files. Each restriction enzyme combination has its own file.
+
+```{r VCF Stats, results='hide'}
+library(vcfR)
+#pst1_vcf <- read.vcfR('~/Data/plurivora/PstI/genotyped.vcf.gz')
+pst1_vcf <- read.vcfR('~/Data/plurivora/PstI/uneak_pst.vcf')
+pst1_vcf
+#sbf1_vcf <- read.vcfR('~/Data/plurivora/SbfI/genotyped.vcf.gz')
+sbf1_vcf <- read.vcfR('~/Data/plurivora/SbfI/uneak_sbf.vcf')
+sbf1_vcf
+```
+
+## Depth Analysis ##
+Now analyze the depth of each collection.
+```{r packages, results="hide"}
+library(ggplot2)
+library(reshape2)
+library(cowplot)
+```
+
+```{r Depth Analysis}
+# Extract depth elements
+pst_dp <- extract.gt(pst1_vcf, element = "DP", as.numeric = TRUE)
+sbf_dp <- extract.gt(sbf1_vcf, element = "DP", as.numeric = TRUE)
+```
+
+```{r Base Boxplot}
+# Make base::boxplot graphic
+par(mar=c(12,4,4,2))
+boxplot(pst_dp, las=3)
+title(ylab= "Depth (DP)")
+```
+
+That wasn't very informative. We'll transform the data next.
+```{r Melting}
+# Rename samples
+sample_association <- read.table(file = "~/Data/plurivora/uneak_sbf_and_pst_dpf_names.csv", header = TRUE, sep = ",")
+colnames(pst_dp) <- sample_association$X.1
+colnames(sbf_dp) <- sample_association$X.1
+
+# Make data frames for each enzyme, combine them
+pst_dpf <- melt(pst_dp, varnames=c('Index', 'Sample'), value.name = 'Depth', na.rm=TRUE)
+pst_dpf <- pst_dpf[ pst_dpf$Depth > 0,]
+pst_dpf$Enzyme <- c('PstI')
+sbf_dpf <- melt(sbf_dp, varnames=c('Index', 'Sample'), value.name = 'Depth', na.rm=TRUE)
+sbf_dpf <- sbf_dpf[ sbf_dpf$Depth > 0,]
+sbf_dpf$Enzyme <- c('SbfI')
+dpf <- rbind(pst_dpf, sbf_dpf)
+```
+
+```{r Enzymes boxplot}
+# Boxplot showing differences between enzymes overall
+p <- ggplot(dpf, aes(Enzyme, Depth))
+p + geom_boxplot()
+```
+
+```{r Violin, fig.width=15, fig.height=15}
+# Now make violin plots by sample
+samps_per_row <- 14
+myRows <- ceiling(length(levels(dpf$Sample))/samps_per_row)
+myList <- vector(mode = "list", length = myRows)
+
+for(i in 1:myRows){
+  myIndex <- c(i*samps_per_row - samps_per_row + 1):c(i*samps_per_row)
+  myIndex <- myIndex[myIndex <= length(levels(dpf$Sample))]
+  myLevels <- levels(dpf$Sample)[myIndex]
+  myRegex <- paste(myLevels, collapse = "$|^")
+  myRegex <- paste("^", myRegex, "$", sep = "")
+  myList[[i]] <- dpf[grep(myRegex, dpf$Sample),]
+  myList[[i]]$Sample <- factor(myList[[i]]$Sample)
+}
+
+# Create the plot.
+myPlots <- vector(mode = "list", length = myRows)
+for(i in 1:myRows){
+  myPlots[[i]] <- ggplot(myList[[i]], aes(x=Enzyme, y=Depth)) + 
+    geom_violin(fill="#8dd3c7", adjust=1.0, scale = "count", trim=TRUE) +
+    facet_grid( . ~ Sample)
+  
+  myPlots[[i]] <- myPlots[[i]] + theme_bw()
+  myPlots[[i]] <- myPlots[[i]] + theme(axis.title.x = element_blank(), 
+                                       axis.text.x = element_text(angle = 60, hjust = 1))
+  myPlots[[i]] <- myPlots[[i]] + scale_y_continuous(trans=scales::log2_trans(), 
+                                                    breaks=c(1, 10, 100, 800),
+                                                    minor_breaks=c(1:10, 2:10*10, 2:8*100))
+  myPlots[[i]] <- myPlots[[i]] + theme( panel.grid.major.y=element_line(color = "#A9A9A9", size=0.6) )
+  myPlots[[i]] <- myPlots[[i]] + theme( panel.grid.minor.y=element_line(color = "#C0C0C0", size=0.2) )
+}
+
+# Here's how each restriction enzyme performed, separated by variant
+plot_grid(plotlist = myPlots, nrow = myRows)
+```
+
+## Missingness Analysis ##
+Depth analysis implies some degree of missingness, but for a more complete picture we should plot missing data as well
+```{r Missingness}
+# First, rename and reorder sample names of VCFs
+# Sort column names into a non-random way
+pst1_vcf_sorted <- pst1_vcf
+pst1_vcf_sorted@gt <- pst1_vcf@gt[,order(colnames(pst1_vcf@gt))]
+# Load in definitions of strata - inclues human readable names
+strata_defs <- read.table("~/Documents/plurivora/GBS_plurivora_strata_for_uneak.csv",
+                          sep = ",", header = TRUE, stringsAsFactors = FALSE)
+# Reassign sample names via the GT column - but do NOT overwrite the first item ("FORMAT")
+colnames(pst1_vcf_sorted@gt)[2:length(colnames(pst1_vcf_sorted@gt))] <- strata_defs$new_name
+pst1_vcf <- pst1_vcf_sorted
+pst_dp <- extract.gt(pst1_vcf, element = "DP", as.numeric = TRUE)
+
+missingness_plots <- function(dp, vcf) {
+  # all samples
+  myMiss <- apply(dp, MARGIN = 2, function(x){ sum(is.na(x))})
+  myMiss <- myMiss/nrow(vcf)
+  myMissName <- substitute(vcf)
+  
+  library(RColorBrewer)
+  palette(brewer.pal(n=12, name = 'Set3'))
+  
+  par(mar = c(12,4,2,1))
+  barplot(myMiss, las = 2, col = 1:12)
+  title(ylab = "Proportion missing", main = myMissName)
+  
+  # frequency distribution
+  par(mar = c(5,4,4,2))
+  myMiss <- apply(dp, MARGIN = 1, function(x){ sum(is.na(x)) })
+  myMiss <- myMiss/ncol(vcf@gt[,-1])
+
+  hist(myMiss, col = "#8DD3C7", xlab = "Proportion Missing",
+       ylab = "Variant Frequency",
+       main = paste("Frequency distribution for ", myMissName, sep = ""))
+}
+missingness_plots(pst_dp, pst1_vcf)
+missingness_plots(sbf_dp, sbf1_vcf)
+```
+
+## Quality Filtering ##
+Now we know a substantial portion of our data is missing. We'll do some quality filtering, getting rid of the bottom 0.1 and top 0.8 quartiles of our data. We'll also require a minimum depth of 4 at a particular variant to proceed. We'll be throwing out variants that don't meet these data.
+
+# Omit missing data #
+```{r already-missing}
+#pst1_vcf <- read.vcfR('~/Data/plurivora/PstI/uneak_pst.vcf')
+# Calculate quartiles
+sbf_quants <- apply(sbf_dp, MARGIN=2, quantile, probs=c(0.05, 0.95), na.rm=TRUE)
+pst_quants <- apply(pst_dp, MARGIN=2, quantile, probs=c(0.05, 0.95), na.rm=TRUE)
+
+# Sweep up the file to get rid of the quartiles
+sbf_dp2 <- sweep(sbf_dp, MARGIN=2, FUN="-", sbf_quants[1,])
+sbf_dp[sbf_dp2 < 0] <- NA
+sbf_dp2 <- sweep(sbf_dp, MARGIN=2, FUN="-", sbf_quants[2,])
+sbf_dp[sbf_dp2 > 0] <- NA
+# And get rid of any variant with below a depth of four
+sbf_dp[sbf_dp < 4] <- NA
+sbf1_vcf@gt[,-1][ is.na(sbf_dp) == TRUE] <- NA
+sbf1_vcf
+
+pst_dp2 <- sweep(pst_dp, MARGIN=2, FUN="-", pst_quants[1,])
+pst_dp[pst_dp2 < 0] <- NA
+pst_dp2 <- sweep(pst_dp, MARGIN=2, FUN="-", pst_quants[2,])
+pst_dp[pst_dp2 > 0] <- NA
+pst_dp[pst_dp < 4] <- NA
+pst1_vcf@gt[,-1][ is.na(pst_dp) == TRUE] <- NA
+pst1_vcf
+```
+
+# Omit samples #
+```{r omit-samples}
+myMiss <- apply(sbf_dp, MARGIN = 2, function(x){ sum( is.na(x) ) } )
+myMiss <- myMiss / nrow(sbf_dp)
+sbf1_vcf2 <- sbf1_vcf
+sbf1_vcf2@gt <- sbf1_vcf@gt[, c(TRUE, myMiss < 0.95)]
+sbf1_vcf2
+sbf1_2dp <- extract.gt(sbf1_vcf2, element = "DP", as.numeric=TRUE)
+heatmap.bp(sbf1_2dp, rlabels = FALSE)
+
+myMiss <- apply(pst_dp, MARGIN = 2, function(x){ sum( is.na(x) ) } )
+myMiss <- myMiss / nrow(pst_dp)
+pst1_vcf2 <- pst1_vcf
+pst1_vcf2@gt <- pst1_vcf@gt[, c(TRUE, myMiss < 0.95)]
+pst1_vcf2
+pst1_2dp <- extract.gt(pst1_vcf2, element = "DP", as.numeric=TRUE)
+heatmap.bp(pst1_2dp, rlabels = FALSE)
+# Notice there are 13 more samples in Pst than Sbf. Let's equalize that to compare fairly between them
+# myMiss <- apply(pst_dp, MARGIN = 2, function(x){ sum( is.na(x) ) } )
+# myMiss <- myMiss / nrow(pst_dp)
+# pst1_vcf2 <- pst1_vcf
+# pst1_vcf2@gt <- pst1_vcf@gt[, c(TRUE, myMiss < 0.55)]
+# pst1_vcf2
+# pst1_2dp <- extract.gt(pst1_vcf2, element = "DP", as.numeric=TRUE)
+```
+
+# Omit variants #
+```{r omit-variants}
+# myMiss <- apply(sbf1_2dp, MARGIN=1, function(x) { sum( is.na(x) ) } )
+# myMiss <- myMiss / ncol(sbf1_2dp)
+# sbf1_vcf3 <- sbf1_vcf2[myMiss < 0.5, ]
+# sbf1_vcf3
+# dp <- extract.gt(sbf1_vcf3, element="DP", as.numeric = TRUE)
+# heatmap.bp(dp, rlabels=FALSE)
+
+myMiss <- apply(pst1_2dp, MARGIN=1, function(x) { sum( is.na(x) ) } )
+myMiss <- myMiss / ncol(pst1_2dp)
+pst1_vcf3 <- pst1_vcf2[myMiss < 0.5, ]
+pst1_vcf3
+# Sort column names into a non-random way for future writing
+pst1_vcf3_sorted <- pst1_vcf3
+pst1_vcf3_sorted@gt <- pst1_vcf3@gt[,order(colnames(pst1_vcf3@gt))]
+dp <- extract.gt(pst1_vcf3_sorted, element="DP", as.numeric = TRUE)
+heatmap.bp(dp, rlabels=FALSE)
+median.dp <- apply(dp, MARGIN = 2, median, na.rm=TRUE)
+mean(median.dp)
+barplot(median.dp)
+
+```
+
+### Analysis ###
+From the above data, it's clear that the Sbf1-restricted data was bad. Let's move into Poppr with only the Pst1 data.
+## Determining Ploidy
+```{r allele balance}
+# ad <- extract.gt(pst1_vcf3, element = 'AD')
+# allele1 <- masplit(ad, record=1)
+# allele2 <- masplit(ad, record=2)
+# 
+# ad1 <- allele1 / (allele1 + allele2)
+# ad2 <- allele2 / (allele1 + allele2)
+# hist(ad2[,"M-16-S_1"], breaks = seq(0,1,by=0.02), col = "#1f78bf", xaxt="n")
+# hist(ad1[,"M-16-S_1"], breaks = seq(0,1,by=0.02), col = "#a6cee3", add=TRUE)
+# axis(side=1, at=c(0,0.25,0.333,0.5,0.666,0.75,1), labels=c(0,"1/4","1/3","1/2","1/3","3/4",1))
+```
+
+remove homozygotes, replot
+```{r homozygotes}
+# gt <- extract.gt(pst1_vcf3, element = 'GT')
+# hets <- is_het(gt)
+# 
+# is.na( ad[ !hets ] ) <- TRUE
+# 
+# allele1 <- masplit(ad, record = 1)
+# allele2 <- masplit(ad, record = 2)
+# 
+# ad1 <- allele1 / (allele1 + allele2)
+# ad2 <- allele2 / (allele1 + allele2)
+# 
+# hist(ad2[,"M-16-S_2"], breaks = seq(0,1,by=0.02), col = "#1f78b4", xaxt="n")
+# hist(ad1[,"M-16-S_2"], breaks = seq(0,1,by=0.02), col = "#a6cee3", add = TRUE)
+# axis(side=1, at=c(0,0.25,0.333,0.5,0.666,0.75,1), labels=c(0,"1/4","1/3","1/2","1/3","3/4",1))
+```
+Remove shoulders and improve plot
+```{r improvement}
+# ad <- extract.gt(pst1_vcf3, element = 'AD')
+# #ad[1:3,1:4]
+# 
+# allele1 <- masplit(ad, record = 1)
+# allele2 <- masplit(ad, record = 2)
+# 
+# # Subset to a vector for manipulation.
+# tmp <- allele1[,"M-16-S_2"]
+# #sum(tmp == 0, na.rm = TRUE)
+# #tmp <- tmp[tmp > 0]
+# tmp <- tmp[tmp <= 100]
+# 
+# hist(tmp, breaks=seq(0,100,by=1), col="#808080", main = "M-16-S_2")
+# sums <- apply(allele1, MARGIN=2, quantile, probs=c(0.15, 0.95), na.rm=TRUE)
+# sums[,"M-16-S_2"]
+# abline(v=sums[,"M-16-S_2"], col=2, lwd=2)
+```
+
+# clean up
+```{r cleanup}
+# pst1_vcf4 <- pst1_vcf3
+# sums <- apply(allele1, MARGIN=2, quantile, probs=c(0.15, 0.95), na.rm=TRUE)
+# # Allele 1
+# dp2 <- sweep(allele1, MARGIN=2, FUN = "-", sums[1,])
+# #allele1[dp2 < 0] <- NA
+# pst1_vcf4@gt[,-1][ dp2 < 0 & !is.na(pst1_vcf4@gt[,-1]) ] <- NA
+# dp2 <- sweep(allele1, MARGIN=2, FUN = "-", sums[2,])
+# #allele1[dp2 > 0] <- NA
+# pst1_vcf4@gt[,-1][dp2 > 0] <- NA
+# # Allele 2
+# dp2 <- sweep(allele2, MARGIN=2, FUN = "-", sums[1,])
+# pst1_vcf4@gt[,-1][ dp2 < 0 & !is.na(pst1_vcf4@gt[,-1]) ] <- NA
+# dp2 <- sweep(allele2, MARGIN=2, FUN = "-", sums[2,])
+# pst1_vcf4@gt[,-1][dp2 > 0] <- NA
+# # see histogram
+# gt <- extract.gt(pst1_vcf4, element = 'GT')
+# hets <- is_het(gt)
+# is.na( ad[ !hets ] ) <- TRUE
+# 
+# allele1 <- masplit(ad, record = 1)
+# allele2 <- masplit(ad, record = 2)
+# 
+# ad1 <- allele1 / (allele1 + allele2)
+# ad2 <- allele2 / (allele1 + allele2)
+# 
+# hist(ad2[,"M-4319_1"], breaks = seq(0,1,by=0.02), col = "#1f78b4", xaxt="n", main="M-4319_1")
+# hist(ad1[,"M-4319_1"], breaks = seq(0,1,by=0.02), col = "#a6cee3", add = TRUE)
+# axis(side=1, at=c(0,0.25,0.333,0.5,0.666,0.75,1), labels=c(0,"1/4","1/3","1/2","2/3","3/4",1))
+```
+
+```{r Conversion}
+
+vcfR::write.vcf(pst1_vcf3_sorted, file="/home/local/USDA-ARS/nicholas.carleson/Data/plurivora/pst_uneak_coveragefiltered1.vcf.gz")
+pst1_genind <- vcfR2genind(pst1_vcf3_sorted)
+pst1_genlight <- vcfR2genlight(pst1_vcf3_sorted)
+#pst1_genind
+#pst1_genlight
+save(pst1_vcf3, file = "~/Data/plurivora/pst1_vcf3")
+save(pst1_genind, file ="~/Data/plurivora/pst1_genind")
+save(pst1_genlight, file = "~/Data/plurivora/pst1_genlight")
+```
+
+Now subset the final VCF for 10 variants to use in VCFtools LD analysis
+```{r subset}
+subset_vcf <- function(x, num.var) {
+  dims <- dim(x@gt)
+  set.seed(56)
+  variants <- sample(1:dims[1], size = num.var, replace = FALSE)
+  x[i = variants, j = 1:dims[2]]
+}
+
+new_vcf <- subset_vcf(pst1_vcf3_sorted, 20)
+write.vcf(new_vcf, file = "~/Data/plurivora/pst1_vcf3_subset20.vcf.gz")
+```
+## Next Steps
+Now move on to the next scripts with your gen* files!
+
+###Output files you need:
+pst1_vcf3
+pst1_genind
+pst1_genlight

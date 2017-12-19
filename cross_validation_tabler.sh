@@ -4,9 +4,11 @@
 # for K in 1 2 3 4 5; do admixture --cv some_pedigree.bed $K | tee log${K}.out; done
 
 # Create list of necessary files
-log_files=$1
-echo "searching $1 and related files"
-ls -1 county_log*.out > logs.list
+for file in "$@"; do echo "$file" >> logs.list; done
+echo "associated logs to search: "
+head -n 1 logs.list
+echo "number of logs: "
+wc -l logs.list | cut -d ' ' -f 1
 
 # Get K value in column one, cross-validation value in column 2
 # Write to file cv.txt

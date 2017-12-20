@@ -36,28 +36,49 @@ library(gplots)
 library(reshape2)
 library(ggplot2)
 
-load("~/Data/plurivora/pst1_vcf3")
-load("~/Data/plurivora/pst1_genind")
-load("~/Data/plurivora/pst1_genlight")
+# UNEAK associated files
+#load("~/Data/plurivora/pst1_vcf3")
+#load("~/Data/plurivora/pst1_genind")
+#load("~/Data/plurivora/pst1_genlight")
+
+# Stacks associated files
+load("~/Data/plurivora/PstI/stacks_121317/final_genind")
+load("~/Data/plurivora/PstI/stacks_121317/final_genlight")
+load("~/Data/plurivora/PstI/stacks_121317/final_vcf")
 ```
 
 ### Initializing objects
 Check out the objects and prepare them
 ```{r inspect}
+# Convert from genind to genclone for further processing
+# Added 12/19/17: pst1_genind comes from Stacks VCF (running_stacks.Rmd)
+# rather than UNEAK VCF (depth_missingness_coding_genotypedgvcf.Rmd)
+#pst1_genclone <- as.genclone(pst1_genind)
+pst1_genclone <- as.genclone(final_genind)
+pst1_genlight <- final_genlight
+pst1_vcf3 <- vcf_95_samples2_vars
 pst1_vcf3
 
-# Convert from genind to genclone for further processing
-pst1_genclone <- as.genclone(pst1_genind)
-
 # Load in definitions of strata
-strata_defs <- read.table("~/Documents/plurivora/GBS_plurivora_strata_for_uneak.csv",
+# UNEAK strata definitions
+#strata_defs <- read.table("~/Documents/plurivora/GBS_plurivora_strata_for_uneak.csv",
+#                          sep = ",", header = TRUE, stringsAsFactors = FALSE)
+# Stacks strata definitions
+strata_defs <- read.table("~/Documents/plurivora/popmap_stacks_pstI.csv",
                           sep = ",", header = TRUE, stringsAsFactors = FALSE)
+
 # Reduce the number of defined individuals in key to only filtered individuals
 # for genclone
-strata_defs_filtered <- subset(strata_defs[,], strata_defs$new_name %in% rownames(pst1_genclone@tab))
+# UNEAK
+# strata_defs_filtered <- subset(strata_defs[,], strata_defs$new_name %in% rownames(pst1_genclone@tab))
+# Stacks
+strata_defs_filtered <- subset(strata_defs[,], strata_defs$Sample %in% rownames(pst1_genclone@tab))
 strata(pst1_genclone) <- strata_defs_filtered
 # for genlight
-strata_defs_filtered <- subset(strata_defs[,], strata_defs$new_name %in% pst1_genlight@ind.names)
+# UNEAK
+# strata_defs_filtered <- subset(strata_defs[,], strata_defs$new_name %in% pst1_genlight@ind.names)
+# Stacks
+strata_defs_filtered <- subset(strata_defs[,], strata_defs$Sample %in% rownames(pst1_genclone@tab))
 strata(pst1_genlight) <- strata_defs_filtered
 ```
 
@@ -115,8 +136,11 @@ locus_table(pst1_genclone)[1:20,]
 
 ### Phylogenetically uninformative loci
 Remove loci that contain less than 2/N % of loci, with N equal to number of individuals in data set
-```{r loci}
+```{r loci, warning=FALSE, message=FALSE}
 nLoc(pst1_genclone)
+
+# WARNING: DO NOT use inform loci. It's meant for microsat data.
+# JUST FILTER ON MAF in vcfR
 iPst <- informloci(pst1_genclone)
 nLoc(iPst)
 # Notice there are fewer loci - how does this affect association?
@@ -130,9 +154,15 @@ First take a look at geography.
 ```{r DAPC, message=FALSE}
 # for genclone
 # Scatter plot
-dapc.iPst <- dapc(iPst, var.contrib = TRUE, center = FALSE, n.pca = 50,  n.da = nPop(iPst) - 1)
+# only using informative loci
+setPop(pst1_genclone) <- ~Town/County
+setPop(pst1_genlight) <- ~Town/County
+#dapc.iPst <- dapc(iPst, var.contrib = TRUE, center = FALSE, n.pca = 50,  n.da = nPop(iPst) - 1)
+# using all loci
+dapc.iPst <- dapc(pst1_genclone, var.contrib = TRUE, center = FALSE, n.pca = 50,  n.da = nPop(iPst) - 1)
 optim.a.score(dapc.iPst)
-dapc.iPst <- dapc(iPst, var.contrib = TRUE, center = FALSE, n.pca = 17, n.da = 2)
+#dapc.iPst <- dapc(iPst, var.contrib = TRUE, center = FALSE, n.pca = 17, n.da = 2)
+dapc.iPst <- dapc(pst1_genclone, var.contrib = TRUE, center = FALSE, n.pca = 17, n.da = 2)
 scatter(dapc.iPst, mstree = TRUE, lwd = 2, lty = 2)
 
 # Compoplot
@@ -155,7 +185,7 @@ p
 # scatter(dapc.iPst_genlight, mstree = TRUE, lwd = 2, lty = 2)
 ```
 ### Sample source
-```{r structure 2, fig.width=12}
+```{r structure 2, fig.width=12, warning=FALSE, message=FALSE}
 # Establish source specifications
 setPop(pst1_genclone) <- ~Source
 setPop(pst1_genlight) <- ~Source
@@ -164,9 +194,9 @@ iPst_source <- informloci(pst1_genclone)
 ```{r sample source continued}
 #for genclone
 # Scatter plots
-dapc.iPst_source <- dapc(iPst_source, var.contrib = TRUE, center = FALSE, n.pca = 25,  n.da = nPop(iPst) - 1)
+dapc.iPst_source <- dapc(pst1_genclone, var.contrib = TRUE, center = FALSE, n.pca = 25,  n.da = nPop(iPst) - 1)
 optim.a.score(dapc.iPst_source)
-dapc.iPst_source <- dapc(iPst_source, var.contrib = TRUE, center = FALSE, n.pca = 19, n.da = 2)
+dapc.iPst_source <- dapc(pst1_genclone, var.contrib = TRUE, center = FALSE, n.pca = 19, n.da = 2)
 scatter(dapc.iPst_source, mstree = TRUE, lwd = 2, lty = 2)
 
 # Compoplots
@@ -207,31 +237,39 @@ iPst_Source     |Source             | Where on the plant system
 # plot(tree)
 # add.scale.bar(length = 0.05) # scale bar showing 5% diff.
 
+setPop(pst1_genclone) <- ~Town/County
+setPop(pst1_genlight) <- ~Town/County
+
 # bootstrapped tree
-geo_tree <- aboot(iPst, dist = nei.dist, sample = 200, tree = "nj", cutoff = 50, quiet = TRUE)
+geo_tree <- aboot(pst1_genclone, dist = nei.dist, sample = 200, tree = "nj", cutoff = 50, quiet = TRUE)
 library("ape")
 library(phangorn)
 cols <- rainbow(4)
-plot.phylo(ladderize(midpoint(geo_tree)), cex = 0.8, font = 2, adj = 0, tip.color = cols[pop(iPst)],
+plot.phylo(ladderize(midpoint(geo_tree)), cex = 0.8, font = 2, adj = 0, tip.color = cols[pop(pst1_genclone)],
            label.offset = 0.0125, type = "unrooted")
 nodelabels(geo_tree$node.label, adj = c(1.3, -0.5), frame = "n", cex = 0.8,
            font = 3, xpd = TRUE)
 legend('topleft', legend = levels(pop(iPst)), fill = cols, border = FALSE, bty = "n", cex = 2)
 #axisPhylo(3)
+setPop(pst1_genclone) <- ~Source
 aboot(iPst_source, dist = provesti.dist, sample = 200, tree = "nj", cutoff = 50, quiet = TRUE)
 ```
 ##Fst
 ```{r fst, fig.width=16}
 # for genclone
+setPop(pst1_genclone) <- ~Town/County
 fst_iPst <- pairwise.fst(iPst, res.type="matrix")
-fst_iPst_source <- pairwise.fst(iPst_source, res.type = "matrix")
-
 fst_iPst
 heatmap.2(fst_iPst, dendrogram = "column", "Town_County of origin",
           srtCol = 15, srtRow = 60)
+
+setPop(pst1_genclone) <- ~Source
+fst_iPst_source <- pairwise.fst(iPst_source, res.type = "matrix")
 fst_iPst_source
 heatmap.2(fst_iPst_source, dendrogram = "column", main = "Sample Source",
           srtCol = 15, srtRow = 60)
+
+
 
 # for genlight - DOES NOT WORK
 # setPop(pst1_genclone) <- ~Source
@@ -292,27 +330,28 @@ library(RColorBrewer)
 ```
 ```{r msn, error=TRUE}
 # First geography
-Pst.dist <- bitwise.dist(iPst)
-Pst.msn <- poppr.msn(iPst, Pst.dist, showplot = FALSE, include.ties = T)
+setPop(pst1_genclone) <- ~Town/County
+Pst.dist <- bitwise.dist(pst1_genclone)
+Pst.msn <- poppr.msn(pst1_genclone, Pst.dist, showplot = FALSE, include.ties = T)
 
-node.size <- rep(2, times = nInd(iPst))
-names(node.size) <- indNames(iPst)
+node.size <- rep(2, times = nInd(pst1_genclone))
+names(node.size) <- indNames(pst1_genclone)
 vertex.attributes(Pst.msn$graph)$size <- node.size
 
 set.seed(9)
-plot_poppr_msn(iPst, Pst.msn, palette=brewer.pal(n = nPop(iPst), name = "Dark2"), gadj = 70)
+plot_poppr_msn(pst1_genclone, Pst.msn, palette=brewer.pal(n = nPop(pst1_genclone), name = "Dark2"), gadj = 70)
 
 # Now source
-Pst.dist_source <- bitwise.dist(iPst_source)
-Pst.msn_source <- poppr.msn(iPst_source, Pst.dist_source, showplot = FALSE, include.ties = T)
+setPop(pst1_genclone) <- ~Source
+Pst.dist <- bitwise.dist(pst1_genclone)
+Pst.msn <- poppr.msn(pst1_genclone, Pst.dist, showplot = FALSE, include.ties = T)
 
-node.size <- rep(2, times = nInd(iPst_source))
-names(node.size) <- indNames(iPst_source)
-vertex.attributes(Pst.msn_source$graph)$size <- node.size
+node.size <- rep(2, times = nInd(pst1_genclone))
+names(node.size) <- indNames(pst1_genclone)
+vertex.attributes(Pst.msn$graph)$size <- node.size
 
 set.seed(9)
-plot_poppr_msn(iPst_source, Pst.msn_source, palette=brewer.pal(n = nPop(iPst_source),
-                                                                      name = "Dark2"), gadj = 70)
+plot_poppr_msn(pst1_genclone, Pst.msn, palette=brewer.pal(n = nPop(pst1_genclone), name = "Dark2"), gadj = 70)
 ```
 
 ## Linkage Disequilbrium
@@ -329,17 +368,17 @@ ia(Yam, sample = 99)
 ```
 ## AMOVA
 ```{r amova, message = FALSE, error = FALSE}
-iPst_amova_town <- poppr.amova(iPst, ~Town, clonecorrect = TRUE)
-iPst_amova_county <- poppr.amova(iPst, ~County, clonecorrect = TRUE)
-iPst_amova_source <- poppr.amova(iPst, ~Source, clonecorrect = TRUE)
+iPst_amova_town <- poppr.amova(pst1_genclone, ~Town, clonecorrect = TRUE)
+iPst_amova_county <- poppr.amova(pst1_genclone, ~County, clonecorrect = TRUE)
+iPst_amova_source <- poppr.amova(pst1_genclone, ~Source, clonecorrect = TRUE)
 set.seed(1776)
 iPst_town_signif <- randtest(iPst_amova_town, nrepet = 999)
 iPst_county_signif <- randtest(iPst_amova_county, nrepet = 999)
 iPst_source_signif <- randtest(iPst_amova_source, nrepet = 999)
 # Compare to a random structure...
-iPst.new <- iPst
+iPst.new <- pst1_genclone
 set.seed(1901)
-strata(iPst.new) <- strata(iPst)[sample(nInd(iPst)), -1]
+strata(iPst.new) <- strata(pst1_genclone)[sample(nInd(iPst)), -1]
 iPst_town_random <- poppr.amova(iPst.new, ~Town)
 iPst_town_random
 iPst_town_random_signif <- randtest(iPst_town_random, nrepet = 999)

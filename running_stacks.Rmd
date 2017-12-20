@@ -1,10 +1,12 @@
 ---
-title: "GBS Raw Reads to PopGen"
+title: "GBS Raw Reads to PopGen of *Phytophthora Plurivora*"
 author: "Nick Carleson"
 date: "December 11, 2017"
 output:
   html_document:
 #    code_folding: hide
+    toc: true
+    toc_float: true
 ---
 
 ```{r setup, include=FALSE}
@@ -15,6 +17,9 @@ knitr::opts_chunk$set(echo = TRUE)
 library(ggplot2)
 library(vcfR)
 library(reshape2)
+library(cowplot)
+library(dplyr)
+library(forcats)
 ```
 # Variant Calling
 
@@ -93,70 +98,321 @@ This data set is ~365 million reads... it took stacks a very long time to comple
 
 full commands (7 steps) and files required to execute successfully are in `pipeline_rerun_denovo_map_subset.txt`.
 
-## PLINK analysis
-None of this is probably legit because I haven't done filtering for coverage yet. I probably should use vcfR (below) to filter and then create the bed.
 
-First, Admixture. Admixture didn't actually work using PED files, I had to convert tob BED first :/
-```{r admixture, engine='bash', eval=FALSE}
-plink --file batch_1.plink --maf 0.05 --make-bed --out batch_2 --noweb
-for K in 1 2 3 4 5; do admixture --cv batch_2.bed $K | tee log${K}.out; done
-```
-Now use `grep -h CV log*.out` to get the cross validation list. 
-
-> CV error (K=1): 1.08850  
-CV error (K=2): 0.69783  
-CV error (K=3): 0.74573  
-CV error (K=4): 0.59584  
-CV error (K=5): 0.67708  
-
-Let's get that into an R data frame
-```{r cv-df}
-cv <- data.frame(K = c(1,2,3,4,5), CV = c(1.08850, 0.69783, 0.74573, 0.59584, 0.67708))
-ggplot(cv, mapping = aes(y = CV, x = K)) +
-  geom_line(alpha = 1.0) +
-  geom_point(alpha = 1.0) +
-  ylab("cross-validation error")
-```
-
-Cross validation plot seems to hint at having four populations. Let's see what the "Structure" plot looks like.
-
-```{r structure plot, fig.width=12}
-tbl <- read.table("~/Data/plurivora/PstI/stacks_simulated_data/admixture/batch_2.4.Q")
-# fam file contains metadata
-fam <- read.table("~/Data/plurivora/PstI/stacks_simulated_data/admixture/batch_2.fam")
-# assign sample names to numbers
-tbl$Sample <- fam$V2
-tbl$PopName <- fam$V1
-# TODO: infer population names and reassing V1:V4
-
-tbl2 <- melt(tbl, id = c("Sample", "PopName"))
-#colnames(tbl2) <- c("Sample", "Cluster", "Composition")
-colnames(tbl2) <- c("Sample", "PopName", "Cluster", "Composition")
-# TODO: split data frame into populations by samples
-tbl2_split <- split(tbl2, tbl2$PopName)
-# order the samples by most common, most likely cluster assignment
-tbl2_sorted <- tbl2[with(tbl2, order(PopName, Cluster, -Composition)), ]
-# TODO: recombine the data frame
-
-# TODO: ordered factor the sample name
-#tbl2_sorted$Sample <- factor(tbl2_sorted$Sample, levels = tbl2_sorted$Sample)
-tbl2$Sample <- factor(tbl2$Sample, levels = tbl2[order(tbl2$PopName, tbl2$Cluster, -tbl2$Composition),])
-ggplot(tbl2_sorted) +
-  geom_bar(mapping = aes(x = Sample, y = Composition, fill = Cluster),
-           stat = "identity") +
-  ylab("% Likelihood of Assignment") +
-  facet_grid(. ~ PopName, scales = "free_x") +
-  #scale_x_discrete(limits=tbl2_sorted$Sample)
-  theme(axis.text.x = element_text(angle = 90, hjust = 1))
-# TODO: Ask help from Zach for ordering if things get shuffled
-```
 # VCF Wrangling
 let's look at one of the vcf file outputs from a sample run to see if it worked at all
-```{r packages, results='hide', message=FALSE, warning=FALSE}
+```{r read_vcf, results='hide', message=FALSE, warning=FALSE}
 library(vcfR)
-vcf <- read.vcfR('~/Data/plurivora/PstI/stacks_simulated_data/batch_1.vcf')
-vcf
+vcf <- read.vcfR('~/Data/plurivora/PstI/stacks_121317/town/unfiltered_vcf/batch_1.vcf.gz')
+```
+
+## Filtering
+Since we called our SNPs *de novo*, the best filtering we can do is based on depth.
+
+Set 0 values in VCF to 'NA'
+```{r missing_first}
+vcf_0toMissing <- vcf
+dp <- extract.gt(vcf_0toMissing, element = "DP", as.numeric = TRUE)
+dp[dp == 0] <- NA
+vcf_0toMissing@gt[,-1][ is.na(dp) == TRUE] <- NA
+```
+Before censoring 0's to NA:
+`r show(vcf)`
+Now, here's how much missing data we start off with:
+`r show(vcf_0toMissing)`
+
+### Before filtering
+Let's take a look at our depth
+```{r dp}
 dp <- extract.gt(vcf, element = "DP", as.numeric = TRUE)
-boxplot(dp, las = 3)
-heatmap(dp)
+plot(rowSums(dp))
+```
+
+Looks like there's a huge amount of variants have VERY low counts across all samples.  
+What does this look like in our violin plots?
+```{r Violin, fig.width=15, fig.height=15}
+# First create ggplot-friendly chart
+dpf <- melt(dp, varnames=c('Index', 'Sample'), value.name = 'Depth', na.rm=TRUE)
+dpf_2 <- dpf[ dpf$Depth > 0,]
+# Now make violin plots by sample
+samps_per_row <- 14
+myRows <- ceiling(length(levels(dpf_2$Sample))/samps_per_row)
+myList <- vector(mode = "list", length = myRows)
+
+# Make list of necessary plots
+for(i in 1:myRows){
+  myIndex <- c(i*samps_per_row - samps_per_row + 1):c(i*samps_per_row)
+  myIndex <- myIndex[myIndex <= length(levels(dpf_2$Sample))]
+  myLevels <- levels(dpf_2$Sample)[myIndex]
+  myRegex <- paste(myLevels, collapse = "$|^")
+  myRegex <- paste("^", myRegex, "$", sep = "")
+  myList[[i]] <- dpf_2[grep(myRegex, dpf_2$Sample),]
+  myList[[i]]$Sample <- factor(myList[[i]]$Sample)
+}
+
+# Create the plot.
+myPlots <- vector(mode = "list", length = myRows)
+for(i in 1:myRows){
+  myPlots[[i]] <- ggplot(myList[[i]], aes(x=Sample, y=Depth)) + 
+    geom_violin(fill="#8dd3c7", adjust=1.0, scale = "count", trim=TRUE)
+  
+  myPlots[[i]] <- myPlots[[i]] + theme_bw()
+  myPlots[[i]] <- myPlots[[i]] + theme(axis.title.x = element_blank(), 
+                                       axis.text.x = element_text(angle = 60, hjust = 1))
+  myPlots[[i]] <- myPlots[[i]] + scale_y_continuous(trans=scales::log2_trans(), 
+                                                    breaks=c(1, 10, 100, 800),
+                                                    minor_breaks=c(1:10, 2:10*10, 2:8*100))
+  myPlots[[i]] <- myPlots[[i]] + theme( panel.grid.major.y=element_line(color = "#A9A9A9", size=0.6) )
+  myPlots[[i]] <- myPlots[[i]] + theme( panel.grid.minor.y=element_line(color = "#C0C0C0", size=0.2) )
+}
+
+# Plot the Plot
+# Here's how each restriction enzyme performed, separated by variant
+plot_grid(plotlist = myPlots, nrow = myRows)
+```
+Looks OKAY. Some samples are clearly worse than others.
+
+### During
+
+#### Censorship
+Censor all values based on depth - we'll pick a 95% quantile cutoff as too high. We'll also censor any value that has a depth of less than 4.
+```{r filter_95}
+# re-extract dp just to validate we are doing the right thing...
+dp <- extract.gt(vcf, element = "DP", as.numeric = TRUE)
+# Calculate quantiles
+quants <- apply(dp, MARGIN=2, quantile, probs=c(0.05, 0.95), na.rm=TRUE)
+
+# Sweep up the file to get rid of the quartiles
+dp2 <- sweep(dp, MARGIN=2, FUN="-", quants[1,])
+dp[dp2 < 0] <- NA
+dp2 <- sweep(dp, MARGIN=2, FUN="-", quants[2,])
+dp[dp2 > 0] <- NA
+vcf_95 <- vcf
+vcf_95@gt[,-1][ is.na(dp) == TRUE] <- NA
+
+# Also censor anything with a count of less than 4
+dp[dp < 4] <- NA
+vcf_95@gt[,-1][ is.na(dp) == TRUE] <- NA
+vcf_95
+```
+
+#### Omission
+Censoring just changes abnormal values to "NA", which have now become missing samples. Omit some samples based on criteria of NA-ness.
+
+Omit *samples* with missingness greater than 95%
+```{r omit_samples}
+# extract depth again, just to be sure we are on newest VCF version
+dp <- extract.gt(vcf_95, element = "DP", as.numeric = TRUE)
+# Now omitting samples
+myMiss <- apply(dp, MARGIN = 2, function(x){ sum( is.na(x) ) } )
+myMiss <- myMiss / nrow(dp)
+vcf_95_samples <- vcf_95
+vcf_95_samples@gt <- vcf_95_samples@gt[, c(TRUE, myMiss < 0.95)]
+vcf_95_samples
+```
+
+Omit *variants* with missingness greater than 10%
+```{r omit_variants}
+# extract depth again...
+dp <- extract.gt(vcf_95_samples, element = "DP", as.numeric = TRUE)
+# Now omitting vars
+myMiss <- apply(dp, MARGIN = 1, function(x) {sum(is.na(x))})
+myMiss <- myMiss / ncol(dp)
+vcf_95_samples_vars <- vcf_95_samples
+vcf_95_samples_vars <- vcf_95_samples_vars[myMiss < 0.1, ]
+vcf_95_samples_vars
+```
+
+Now let's get variables to describe the new VCF file
+```{r final_stats}
+# depth matrix after omitting variants and samples
+dp <- extract.gt(vcf_95_samples_vars, element = "DP", as.numeric = TRUE)
+heatmap.bp(dp[1:1000,], rlabels = FALSE)
+
+# amounts of missing data after omitting variants and samples
+myMiss <- apply(dp, MARGIN = 2, function(x){ sum( is.na(x) ) } )
+myMiss <- myMiss / nrow(dp)
+```
+
+The final heatmap doesn't look good for some samples, now... Let's filter *samples* by missingness again. Based on what the missingness looks like overall, we can decide on a new cutoff
+`r myMiss`
+50% Looks to be pretty good - there's a clear distinction between samples above this threshold and below it.
+```{r samples2}
+# Now filter
+vcf_95_samples2_vars <- vcf_95_samples_vars
+vcf_95_samples2_vars@gt <- vcf_95_samples2_vars@gt[, c(TRUE, myMiss < 0.50)]
+vcf_95_samples2_vars
+```
+
+Depth plot of final vcf:
+```{r final_plot}
+dp <- extract.gt(vcf_95_samples2_vars, element = "DP", as.numeric = TRUE)
+heatmap.bp(dp[1:1000,], rlabels = FALSE)
+```
+
+
+### After
+The evolution of our VCF.
+```{r final_vcf}
+#Before processing:
+vcf
+#After changing 0 counts to missing data:
+vcf_0toMissing
+#After censoring variants (converting them to "missing"") with a depth more than 95% of all other variants in each sample:
+vcf_95
+#After filtering out samples with more than 95% missing data:
+vcf_95_samples
+#After filtering out variants with a missingness greater than 10%:
+vcf_95_samples_vars
+#After then filtering out samples again, if they had greater than 50% missing data, we received our final VCF. Here's what it looks like:
+vcf_95_samples2_vars
+```
+This final VCF looks good! Let's write it to file, export it to a genind (poppr/adegenet/ape) and PED/BED (Admixture)
+
+```{r file_finish}
+# VCF to genind
+final_genind <- vcfR2genind(vcf_95_samples2_vars)
+# VCF to genlight
+final_genlight <- vcfR2genlight(vcf_95_samples2_vars)
+# Write VCF to file
+write.vcf(vcf_95_samples2_vars, file = "~/Data/plurivora/PstI/stacks_121317/filtered_snps.vcf.gz")
+# Save VCF, genind, genlight as R objects to load easily
+save(vcf_95_samples2_vars, file = "~/Data/plurivora/PstI/stacks_121317/final_vcf")
+save(final_genind, file = "~/Data/plurivora/PstI/stacks_121317/final_genind")
+save(final_genlight, file = "~/Data/plurivora/PstI/stacks_121317/final_genlight")
+```
+
+To convert to `BED`, we'll need to make a metadata file (FAM). Fortunately, stacks generated `FAM` files for us during its `run_denovo_map` workflow. We do need to subset the `fam`s based on samples we ended up retaining
+```{r subset_assist}
+# make list of samples to use
+list <- colnames(vcf_95_samples2_vars@gt)
+list_noformat <- list[2:length(list)]
+
+# town fam
+subset_fam <- function(x, list, file) {
+  fam <- read.table(x)
+  #all_samples <- fam$V2
+  fam_subset <- subset(fam, V2 %in% list)
+  write.table(fam_subset, file = file, sep = "\t",
+              col.names = FALSE, row.names = FALSE,
+              quote = FALSE)
+}
+
+# town fam
+subset_fam(x = "~/Data/plurivora/PstI/stacks_121317/town/unfiltered_vcf/batch_2.fam",
+           list = list_noformat, file = "~/Data/plurivora/PstI/stacks_121317/subset_town_batch_2.fam")
+# county fam
+subset_fam(x = "~/Data/plurivora/PstI/stacks_121317/county/unfiltered_vcf/batch_2.fam",
+           list = list_noformat, file = "~/Data/plurivora/PstI/stacks_121317/subset_county_batch_2.fam")
+```
+Inspecting the fam files in bash looks okay! Now let's do the conversion.
+This requires `GATK`
+
+```{r bash_conv, engine='bash', eval=FALSE}
+cd ~/Data/plurivora/PstI/stacks_121317
+gunzip filtered_snps.vcf.gz
+vcftools --vcf filtered_snps.vcf --plink --out filtered_plink
+```
+# Admixture
+None of this is probably legit because I haven't done filtering for coverage yet. I probably should use vcfR (below) to filter and then create the bed.
+
+## File prep
+First, Admixture. Admixture didn't actually work using PED files, I had to convert tob BED first :/
+```{r file_prep, engine='bash', eval=FALSE}
+# Convert to binary files
+plink --file filtered_plink --maf 0.05 --make-bed --out filtered_plink_bin --noweb
+# Notice the fam file created doesn't contain any useful population associations
+# We'll use the fam files created via subsetting previously ( subset_fam(x, list, file) )
+cp filtered_plink_bin.bed filtered_plink_bin_county.bed
+cp filtered_plink_bin.bim filtered_plink_bin_county.bim
+mv filtered_plink_bin.bed filtered_plink_bin_town.bed
+mv filtered_plink_bin.bim filtered_plink_bin_town.bim
+mv subset_county_batch_2.fam filtered_plink_bin_county.fam
+mv subset_town_batch_2.fam filtered_plink_bin_town.fam
+```
+## Analyis
+### Cross-validation
+```{r admixture, engine = 'bash', eval = FALSE, results='hide', message=FALSE, warning=FALSE}
+# Run cross-validation
+for K in 1 2 3 4 5 6 7 8 9 10 11 12; do admixture \
+--cv filtered_plink_bin_town.bed $K | tee town_log${K}.out; done
+for K in 1 2 3 4 5 6 7 8 9 10 11 12; do admixture \
+--cv filtered_plink_bin_county.bed $K | tee county_log${K}.out; done
+
+# Write Cross-Validation values to table
+# cross_validation_tabler.sh is on GitHub here:
+# https://github.com/Neato-Nick/variant-calling/blob/master/cross_validation_tabler.sh
+~/Scripts/cross_validation_tabler.sh town_log*.out
+~/Scripts/cross_validation_tabler.sh county_log*.out
+```
+
+Get that into an R data-frame. The cross-validation results should be the same in both population runs. So, we'll only inspect one cross-validation plot. But, the --cv option just additionally runs cross-validation on top of the normal admixture run.
+```{r cv}
+cv_town <- read.table("~/Data/plurivora/PstI/stacks_121317/town/cv.txt")
+cv_town <- cv_town[order(cv_town$V1),]
+rownames(cv_town) <- cv_town$K
+colnames(cv_town) <- c("K", "CV")
+cv_town
+ggplot(cv_town[2:length(cv_town$K),], mapping = aes(y = CV, x = K)) +
+  geom_line(alpha = 1.0) +
+  geom_point(alpha = 1.0) +
+  ylab("cross-validation error") +
+  scale_x_continuous(breaks = c(2, 4, 6, 8, 10, 12))
+```
+There are multiple number of clusters that have low error...lets see all the structure plots
+
+### Structure plots
+Let's see what the "Structure" plot looks like for all of these cross-validation points
+```{r structure plot, fig.width=12}
+plot_Q <- function(tbl, fam) {
+  # assign sample names to numbers
+  tbl$Sample <- fam$V2
+  tbl$PopName <- fam$V1
+
+  
+  tbl2 <- melt(tbl, id = c("Sample", "PopName"))
+
+  colnames(tbl2) <- c("Sample", "PopName", "Cluster", "Composition")
+
+  # ddply solution
+  tbl3 <- tbl2 %>%
+    group_by(PopName, Cluster) %>%
+    summarise(avg = mean(Composition)) %>%
+    right_join(tbl2, by = c("PopName", "Cluster")) %>%
+    arrange(PopName, desc(avg), desc(Composition)) %>%
+    select(-avg) %>%
+    ungroup
+  #show(tbl3)
+  # Make my own greyscale function...
+  #cluster_count <- length(unique(tbl3$Cluster))
+  #bw_cols=colorRampPalette(colors=c('#000000', '#ffffff'))(cluster_count)
+  ggplot(tbl3) +
+    geom_bar(mapping = aes(x = fct_inorder(Sample), y = Composition, fill = Cluster),
+             stat = "identity") +
+    ylab("% Assignment") +
+    xlab("Sample") +
+    # for making own greyscale theme. It didn't work.
+    #scale_colour_manual(values = c('#000000', '#FFFFFF'))
+    #scale_fill_grey() +
+    facet_grid(. ~ PopName, scales = "free_x") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+}
+# fam file contains metadata
+fam1 <- read.table("~/Data/plurivora/PstI/stacks_121317/town/filtered_plink_bin_town.fam")
+
+plot_Q(read.table("~/Data/plurivora/PstI/stacks_121317/town/filtered_plink_bin_town.3.Q"),
+       fam1)
+plot_Q(read.table("~/Data/plurivora/PstI/stacks_121317/town/filtered_plink_bin_town.4.Q",
+                  stringsAsFactors = FALSE),
+       fam1)
+plot_Q(read.table("~/Data/plurivora/PstI/stacks_121317/town/filtered_plink_bin_town.5.Q",
+                  stringsAsFactors = FALSE),
+       fam1)
+plot_Q(read.table("~/Data/plurivora/PstI/stacks_121317/town/filtered_plink_bin_town.6.Q"),
+       fam1)
+plot_Q(read.table("~/Data/plurivora/PstI/stacks_121317/town/filtered_plink_bin_town.7.Q"),
+       fam1)
+plot_Q(read.table("~/Data/plurivora/PstI/stacks_121317/town/filtered_plink_bin_town.8.Q"),
+       fam1)
 ```
